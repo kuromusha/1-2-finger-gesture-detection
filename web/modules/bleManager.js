@@ -12,6 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
+/* Copyright (C) 2021 Ken'ichi Kuromusha modified, Apache License 2.0
+==============================================================================*/
 
 /**
  * File bleManager.js - handles communcation between webpage and Arduino
@@ -39,7 +41,7 @@ const log = (...args) => {
 
 
 function UUID_GEN(val) {
-  return "81c30e5c-" + val + "-4f7d-a886-de3e90749161";
+  return "f0084b9f-" + val + "-4c63-a313-fe122b555baf";
 }
 
 const SERVICE_UUID              = UUID_GEN("0000");
