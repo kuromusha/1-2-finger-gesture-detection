@@ -8,7 +8,7 @@ APDS-9960 on Arduino Nano 33 BLE Sense can only detect 4 gestures (up, down, lef
     - See [TF4Micro Motion Kit for APDS](https://github.com/kuromusha/tf4micro-motion-kit-apds).
 
 1. Go to the URL by using Chrome browser
-    - [1-2 Finger Gesture Detection](https://xetter.com/1-2-finger-gesture-detection/index.html)
+    - [1-2 Finger Gesture Detection](https://xetter.com/1-2-finger-gesture-detection/)
 
 1. Click 'Connect' button
     - Wait until Arduino is connected.
