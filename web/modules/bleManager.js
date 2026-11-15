@@ -12,7 +12,7 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-/* Copyright (C) 2021 Ken'ichi Kuromusha modified, Apache License 2.0
+/* Copyright (C) 2021-2026 Ken'ichi Kuromusha modified, Apache License 2.0
 ==============================================================================*/
 
 /**
@@ -112,6 +112,8 @@ let numClassesTxChar,
 // Keep track of connection
 let isConnected = false;
 let hasModel = false;
+let transferInProgress = false;
+let connectionAttempt = false;
 
 const eventHandler = new EventHandler(
   "inference",
@@ -123,7 +125,8 @@ const eventHandler = new EventHandler(
   "file-transfer-error",
   "quick-inference",
   "state-change",
-  "has-model"
+  "has-model",
+  "error"
 );
 
 /********************************************************************
@@ -131,7 +134,7 @@ const eventHandler = new EventHandler(
  *******************************************************************/
 
 function handleInferenceChange(event) {
-  const values = new Uint8Array(event.target.value.buffer);
+  const values = new Uint8Array(event.target.value.buffer, event.target.value.byteOffset, event.target.value.byteLength);
   eventHandler.dispatchEvent("inference", {
     index: values[0],
     score: values[1],
@@ -148,25 +151,31 @@ async function updateHasModel(){
 
 function handleHasModelChange(event){
   const value = event.target.value;
-  const v = new Uint8Array(value.buffer)[0];
+  const v = value.getUint8(0);
   console.log(v)
   hasModel = v;
   eventHandler.dispatchEvent('has-model', hasModel);
 }
 
 function handleIMUDataChange(event) {
-  const data = new Float32Array(event.target.value.buffer);
+  const view = event.target.value;
+  const data = Array.from({length: Math.floor(view.byteLength / 4)}, (_, i) => view.getFloat32(i * 4, true));
   eventHandler.dispatchEvent("imudata", data);
 }
 
 function onDisconnected(event) {
-  eventHandler.dispatchEvent("disconnect");
+  const wasConnected = isConnected;
   isConnected = false;
+  hasModel = false;
+  bleFileTransfer.reset();
+  if (wasConnected) eventHandler.dispatchEvent("disconnect");
 }
 
 async function connect() {
   log("Requesting device ...");
 
+  if (!navigator.bluetooth) throw new Error("Web Bluetooth is not supported in this browser");
+  if (device) device.removeEventListener("gattserverdisconnected", onDisconnected);
   device = await navigator.bluetooth.requestDevice({
     filters: [{ services: [SERVICE_UUID] }],
   });
@@ -180,17 +189,16 @@ async function connect() {
   log("Getting primary service ...");
   service = await server.getPrimaryService(SERVICE_UUID);
 
-  bleFileTransfer.setupService(service);
+  await bleFileTransfer.setupService(service);
 }
 
 function handleStateChange(e){
   const reader = e.target.value;
-  const byte = new Uint8Array(reader.buffer)[0];
+  const byte = reader.getUint8(0);
   const state = Object.keys(STATES).find(k=>STATES[k]===byte);
-  if(state === STATES.ERROR_STATE){
-    eventHandler.dispatchEvent('error',new Error('Arduion is in error state'));
+  if(byte === STATES.ERROR_STATE){
+    eventHandler.dispatchEvent('error',new Error('Arduino is in error state'));
   }
-  console.log('state cahnge')
   eventHandler.dispatchEvent('state-change', state);
 }
 
@@ -206,72 +214,95 @@ bleFileTransfer.addEventListener("error", (p) => {
   eventHandler.dispatchEvent("file-transfer-error", p);
 });
 
+async function sendFile(fileBuffer, fileType) {
+  if (!Object.prototype.hasOwnProperty.call(FILE_TYPES, fileType)) throw new Error(`Unknown file type: ${fileType}`);
+  if (!isConnected) throw new Error("Bluetooth is not connected");
+  try {
+    await stateTxChar.writeValue(Uint8Array.of(STATES.FILE_TRANSFER));
+    await fileTransferTypeTxChar.writeValue(Uint8Array.of(FILE_TYPES[fileType]));
+    return await bleFileTransfer.transferFile(fileBuffer);
+  } catch (error) {
+    // A failed/cancelled transfer may leave the device protocol out of sync.
+    // Close the link before permitting another transfer.
+    if (device && device.gatt.connected) device.gatt.disconnect();
+    onDisconnected();
+    throw error;
+  }
+}
+
 const bleManagerApi = {
   async connect() {
-  
-    await connect();
-    console.log('SETUP CONNECT!')  
-    numClassesTxChar        = await service.getCharacteristic(NUM_CLASSES_UUID);
-    numSamplesTxChar        = await service.getCharacteristic(NUM_SAMPLES_UUID);
-    captureDelayTxChar      = await service.getCharacteristic(CAPTURE_DELAY_UUID);
-    thresholdTxChar         = await service.getCharacteristic(THRESHOLD_UUID);
-    stateTxChar             = await service.getCharacteristic(STATE_TX_UUID);
-    inferenceRxChar         = await service.getCharacteristic(INFERENCE_RX_UUID);
-    imuDataRxChar           = await service.getCharacteristic(IMU_DATA_RX_UUID);
-    metaRxChar              = await service.getCharacteristic(META_RX_UUID);
-    metaTxChar              = await service.getCharacteristic(META_TX_UUID);
-    stateRxChar             = await service.getCharacteristic(STATE_RX_UUID);
-    fileTransferTypeTxChar  = await service.getCharacteristic(FILE_TYPE_TX_UUID);
-    disableMagnetometerTx   = await service.getCharacteristic(DISABLE_MAGNETOMETER_UUID);
-    hasModelRxChar          = await service.getCharacteristic(HAS_MODEL_RX_UUID);
-    versionRxChar           = await service.getCharacteristic(VERSION_RX_UUID);
-    dataLabelsRxChar        = await service.getCharacteristic(IMU_DATA_LABELS_RX_UUID);
+    if (isConnected) return;
+    if (connectionAttempt) throw new Error("Bluetooth connection is already in progress");
+    connectionAttempt = true;
+    try {
+      await connect();
+      numClassesTxChar        = await service.getCharacteristic(NUM_CLASSES_UUID);
+      numSamplesTxChar        = await service.getCharacteristic(NUM_SAMPLES_UUID);
+      captureDelayTxChar      = await service.getCharacteristic(CAPTURE_DELAY_UUID);
+      thresholdTxChar         = await service.getCharacteristic(THRESHOLD_UUID);
+      stateTxChar             = await service.getCharacteristic(STATE_TX_UUID);
+      inferenceRxChar         = await service.getCharacteristic(INFERENCE_RX_UUID);
+      imuDataRxChar           = await service.getCharacteristic(IMU_DATA_RX_UUID);
+      metaRxChar              = await service.getCharacteristic(META_RX_UUID);
+      metaTxChar              = await service.getCharacteristic(META_TX_UUID);
+      stateRxChar             = await service.getCharacteristic(STATE_RX_UUID);
+      fileTransferTypeTxChar  = await service.getCharacteristic(FILE_TYPE_TX_UUID);
+      disableMagnetometerTx   = await service.getCharacteristic(DISABLE_MAGNETOMETER_UUID);
+      hasModelRxChar          = await service.getCharacteristic(HAS_MODEL_RX_UUID);
+      versionRxChar           = await service.getCharacteristic(VERSION_RX_UUID);
+      dataLabelsRxChar        = await service.getCharacteristic(IMU_DATA_LABELS_RX_UUID);
 
-    await inferenceRxChar.startNotifications();
-    inferenceRxChar.addEventListener(
-      "characteristicvaluechanged",
-      handleInferenceChange
-    );
+      await inferenceRxChar.startNotifications();
+      inferenceRxChar.addEventListener(
+        "characteristicvaluechanged",
+        handleInferenceChange
+      );
 
-    await imuDataRxChar.startNotifications();
-    imuDataRxChar.addEventListener(
-      "characteristicvaluechanged",
-      handleIMUDataChange
-    );
+      await imuDataRxChar.startNotifications();
+      imuDataRxChar.addEventListener(
+        "characteristicvaluechanged",
+        handleIMUDataChange
+      );
 
-    await hasModelRxChar.startNotifications();
-    hasModelRxChar.addEventListener("characteristicvaluechanged", handleHasModelChange)
-   updateHasModel();
+      await hasModelRxChar.startNotifications();
+      hasModelRxChar.addEventListener("characteristicvaluechanged", handleHasModelChange)
+      await updateHasModel();
 
-    await stateRxChar.startNotifications();
-    stateRxChar.addEventListener("characteristicvaluechanged", handleStateChange);
+      await stateRxChar.startNotifications();
+      stateRxChar.addEventListener("characteristicvaluechanged", handleStateChange);
 
-    isConnected = true;
+      if (!device.gatt.connected) throw new Error("Bluetooth disconnected during setup");
+      isConnected = true;
+    } catch (error) {
+      bleFileTransfer.reset();
+      if (device && device.gatt.connected) device.gatt.disconnect();
+      isConnected = false;
+      throw error;
+    } finally {
+      connectionAttempt = false;
+    }
   },
 
   async disconnect() {
-    await bleManagerApi.setState('IDLE_DISCONNECTED');
-    await device.gatt.disconnect()
+    try {
+      if (device && device.gatt.connected && isConnected) {
+        await bleManagerApi.setState('IDLE_DISCONNECTED');
+      }
+    } finally {
+      if (device && device.gatt.connected) device.gatt.disconnect();
+      onDisconnected();
+    }
   },
 
-  async transferFile(fileBuffer, fileType){
-    if(FILE_TYPES[fileType] === undefined){
-      throw new Error(`Unknown file type: ${fileType}, valid options are: ${Object.keys(FILE_TYPES).join(', ')}`)
+  async transferFile(fileBuffer, fileType) {
+    if (transferInProgress) throw new Error("Another transfer is in progress");
+    transferInProgress = true;
+    try {
+      return await sendFile(fileBuffer, fileType);
+    } finally {
+      transferInProgress = false;
     }
-    if (!isConnected) {
-      throw new Error("modelBleTransfer not connected");
-    }
-
-    // Set state to file transfer
-    const stateArray = Uint8Array.of(STATES.FILE_TRANSFER);
-    await stateTxChar.writeValue(stateArray);
-    
-
-    const fileTypeArray = Uint8Array.of(FILE_TYPES[fileType]);
-    await fileTransferTypeTxChar.writeValue(fileTypeArray);
-
-    // transfer file
-    return bleFileTransfer.transferFile(fileBuffer);
   },
 
   async transferModel(
@@ -286,24 +317,30 @@ const bleManagerApi = {
       throw new Error("modelBleTransfer not connected");
     }
 
-    // Write settings
-    const numClassesArray = Uint8Array.of(numClasses);
-    await numClassesTxChar.writeValue(numClassesArray);
+    if (transferInProgress) throw new Error("Another transfer is in progress");
+    transferInProgress = true;
+    try {
+      // Write settings
+      const numClassesArray = Uint8Array.of(numClasses);
+      await numClassesTxChar.writeValue(numClassesArray);
 
-    const numSamplesArray = Int32Array.of(numSamples);
-    await numSamplesTxChar.writeValue(numSamplesArray);
+      const numSamplesArray = Int32Array.of(numSamples);
+      await numSamplesTxChar.writeValue(numSamplesArray);
 
-    const thresholdArray = Float32Array.of(threshold);
-    await thresholdTxChar.writeValue(thresholdArray);
+      const thresholdArray = Float32Array.of(threshold);
+      await thresholdTxChar.writeValue(thresholdArray);
 
-    const captureDelayArray = Int32Array.of(captureDelay);
-    await captureDelayTxChar.writeValue(captureDelayArray);
+      const captureDelayArray = Int32Array.of(captureDelay);
+      await captureDelayTxChar.writeValue(captureDelayArray);
 
-    const disableMagnetometerArray = Uint8Array.of(!useMagnetometer);
-    await disableMagnetometerTx.writeValue(disableMagnetometerArray);
+      const disableMagnetometerArray = Uint8Array.of(!useMagnetometer);
+      await disableMagnetometerTx.writeValue(disableMagnetometerArray);
 
-    // transfer file
-    return bleManagerApi.transferFile(modelBuffer, 'MODEL_FILE')
+      // transfer file
+      return await sendFile(modelBuffer, 'MODEL_FILE');
+    } finally {
+      transferInProgress = false;
+    }
   },
 
   async setDisableMagnetometer(value){
@@ -333,15 +370,15 @@ const bleManagerApi = {
 
   async readMetaRaw() {
     const reader = await metaRxChar.readValue();
-    const bytes = new Uint8Array(reader.buffer);
+    const bytes = new Uint8Array(reader.buffer, reader.byteOffset, reader.byteLength);
     return bytes;
   },
 
   async writeMetaString(message) {
+    const encoded = new TextEncoder().encode(message);
+    if (encoded.length > 64) throw new Error("Meta length has a 64 byte limit");
     const bytes = new Uint8Array(64);
-    message.split("").forEach((c, i) => {
-      bytes[i] = c.charCodeAt(0);
-    });
+    bytes.set(encoded);
     return this.writeMetaRaw(bytes);
   },
 
@@ -354,7 +391,7 @@ const bleManagerApi = {
 
   async readDataProviderLabels(){
     const reader = await dataLabelsRxChar.readValue();
-    const bytes = new Uint8Array(reader.buffer);
+    const bytes = new Uint8Array(reader.buffer, reader.byteOffset, reader.byteLength);
     let utf8Decoder = new TextDecoder();
     let labels = utf8Decoder.decode(bytes);
     // fix typo bug in Arduino sketch (v005)
@@ -364,13 +401,13 @@ const bleManagerApi = {
 
   async readVersion(){
     const reader = await versionRxChar.readValue();
-    const bytes = new Uint8Array(reader.buffer);
+    const bytes = new Uint8Array(reader.buffer, reader.byteOffset, reader.byteLength);
     return bytes[0];
   },
 
   async getState() {
     const reader = await stateRxChar.readValue();
-    const byte = new Uint8Array(reader.buffer)[0];
+    const byte = reader.getUint8(0);
     return Object.keys(STATES).find((k) => STATES[k] === byte);
   },
 
