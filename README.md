@@ -16,7 +16,8 @@ APDS-9960 on Arduino Nano 33 BLE Sense can only detect 4 gestures (up, down, lef
 
 1. Click 'Model Transfer' button
     - Wait until the transfer is finished.
-    - It may take a couple of minutes.
+    - Wait for 'Transfer successful!' after the device confirms the transfer and checksum.
+    - The transfer times out after 120 seconds. If it fails, reconnect and retry.
 
 1. Swipe your fingers above Arduino
     - This tool can detect 8 gestures.

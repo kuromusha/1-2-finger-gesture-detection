@@ -13,97 +13,96 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================
-Copyright (C) 2021 Ken'ichi Kuromusha modified, Apache License 2.0
+Copyright (C) 2021-2026 Ken'ichi Kuromusha modified, Apache License 2.0
 ==============================================================================
 
 -->
 <!DOCTYPE html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta http-equiv="X-UA-Compatible" content="IE=edge" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>1-2 Finger Gesture Detection</title>
-  </head>
-  <body>
-    <h2>1-2 Finger Gesture Detection</h2>
-    <p>data provider labels: <span id="labelsTxt">?</span></p>
-    <button id="connectBtn">Connect</button>
-    <button id="transferBtn" disabled>Model Transfer</button>
-    
-    <p id="statusEl"></p>
-    <p id="inferenceEl"></p>
-    <p id="imuDataEl"></p>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>1-2 Finger Gesture Detection</title>
+</head>
+<body>
+  <h1>1-2 Finger Gesture Detection</h1>
+  <p>data provider labels: <span id="labelsTxt">?</span></p>
+  <button id="connectBtn" type="button">Connect</button>
+  <button id="transferBtn" type="button" disabled>Model Transfer</button>
+  <p id="statusEl" role="status" aria-live="polite">Click Connect</p>
+  <p id="imuDataEl"></p>
+  <script type="module">
+    import * as api from "./api.js";
+    const connectBtn = document.getElementById("connectBtn");
+    const transferBtn = document.getElementById("transferBtn");
+    const labelsTxt = document.getElementById("labelsTxt");
+    const statusEl = document.getElementById("statusEl");
+    const imuDataEl = document.getElementById("imuDataEl");
+    const GESTURES = ["Right with 1 finger", "Right with 2 fingers", "Left with 1 finger", "Left with 2 fingers",
+      "Up with 1 finger", "Up with 2 fingers", "Down with 1 finger", "Down with 2 fingers"];
+    let busy = false;
+    function updateButtons() {
+      connectBtn.disabled = busy || !navigator.bluetooth;
+      connectBtn.textContent = api.isConnected() ? "Disconnect" : "Connect";
+      transferBtn.disabled = busy || !api.isConnected();
+    }
+    function showError(error) { statusEl.textContent = error.message || String(error); }
+    if (!navigator.bluetooth) statusEl.textContent = "This browser does not support Web Bluetooth. Please use a supported browser over HTTPS.";
+    updateButtons();
 
-    <script type="module">
-      import * as api from "./api.js";
+    api.addEventListener("disconnect", () => {
+      labelsTxt.textContent = "?";
+      imuDataEl.textContent = "";
+      statusEl.textContent = "Disconnected. Click Connect to reconnect.";
+      updateButtons();
+    });
+    api.addEventListener("error", showError);
+    api.addEventListener("file-transfer-error", showError);
 
-      const GESTURES = [
-        "Right with 1 finger",
-        "Right with 2 fingers",
-        "Left with 1 finger",
-        "Left with 2 fingers",
-        "Up with 1 finger",
-        "Up with 2 fingers",
-        "Down with 1 finger",
-        "Down with 2 fingers"
-      ];
-
-      async function handleConnected() {
-        transferBtn.removeAttribute("disabled");
-        connectBtn.innerText = 'disconnect';
-        labelsTxt.innerText = await api.readDataProviderLabels()
+    connectBtn.addEventListener("click", async () => {
+      busy = true;
+      updateButtons();
+      try {
+        if (api.isConnected()) {
+          await api.disconnect();
+        } else {
+          statusEl.textContent = "Connecting...";
+          await api.connect();
+          labelsTxt.textContent = await api.readDataProviderLabels();
+          if (api.isConnected()) statusEl.textContent = "Connected! Arduino LED should now be blue.";
+        }
+      } catch (error) {
+        showError(error);
+      } finally {
+        busy = false;
+        updateButtons();
       }
+    });
 
-      function handleDisconnected() {
-        transferBtn.setAttribute("disabled", true);
-        statusEl.innerText = "Click connect";
-        connectBtn.innerText = 'connect';
+    transferBtn.addEventListener("click", async () => {
+      busy = true;
+      updateButtons();
+      statusEl.textContent = "Transferring model...";
+      try {
+        await api.transferModel({model: "./static/model.tflite", numClasses: 8,
+          threshold: 0.1, numSamples: 15, captureDelay: 200});
+        statusEl.textContent = "Transfer successful!";
+      } catch (error) {
+        showError(error);
+      } finally {
+        busy = false;
+        updateButtons();
       }
-
-      statusEl.innerText = "Click connect";
-
-      connectBtn.addEventListener("click", () => {
-        statusEl.innerText = "Connecting...";
-
-        api.connect().then(() => {
-          statusEl.innerText = "Connected! Arduino LED should now be blue";
-        });
-      });
-
-      api.addEventListener('connect', handleConnected);
-      api.addEventListener('disconnect', handleDisconnected);
-      
-
-      transferBtn.addEventListener("click", () => {
-        statusEl.innerText = "Transfering!";
-
-        api
-          .transferModel({
-            model: "./static/model.tflite",
-            numClasses: 8,
-            threshold: 0.1,
-            numSamples: 15,
-            captureDelay: 200
-          })
-          .then(() => {
-            statusEl.innerText = "Transfer successful!";
-          });
-      });
-
-      api.addEventListener("inference", ({ index, score, velocity }) => {
-        statusEl.innerText = `Detected: ${GESTURES[index]} (score: ${score}, velocity: ${velocity})`;
-      });
-
-      api.addEventListener("imudata", (data) => {
-        imuDataEl.innerText =
-          "received data: " + [...data].map((v) => v.toFixed(4)).join(",");
-      });
-
-      api.addEventListener("file-transfer-progress", (p) => {
-        statusEl.innerText = `Transfering! ${Math.floor(p * 100)}%`;
-      });
-    </script>
-    <script></script>
-  </body>
+    });
+    api.addEventListener("file-transfer-progress", progress => {
+      statusEl.textContent = progress < 1 ? `Transferring! ${Math.floor(progress * 100)}%` : "Verifying transfer...";
+    });
+    api.addEventListener("inference", ({index, score, velocity}) => {
+      if (!busy) statusEl.textContent = `Detected: ${GESTURES[index] || "Unknown gesture"} (score: ${score}, velocity: ${velocity})`;
+    });
+    api.addEventListener("imudata", data => {
+      imuDataEl.textContent = "received data: " + [...data].map(value => value.toFixed(4)).join(",");
+    });
+  </script>
+</body>
 </html>
